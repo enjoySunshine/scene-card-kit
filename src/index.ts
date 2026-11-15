@@ -320,5 +320,8 @@ export {
 	AttachedFile,
 	type TrackDisposition,
 } from './metadata';
+export {
+	type Chapter,
+} from './chapters';
 
 // 🐡🦔

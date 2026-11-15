@@ -17,6 +17,7 @@ import {
 	toArray,
 	TransformationMatrix,
 } from './misc';
+import { Chapter, validateChapters } from './chapters';
 import { MetadataTags, TrackDisposition, validateMetadataTags, validateTrackDisposition } from './metadata';
 import { Muxer } from './muxer';
 import { OutputFormat } from './output-format';
@@ -468,6 +469,8 @@ export class Output<
 	/** @internal */
 	_metadataTags: MetadataTags = {};
 	/** @internal */
+	_chapters: Chapter[] = [];
+	/** @internal */
 	_rootTarget: T | null = null;
 	/** @internal */
 	_rootTargetPromise: Promise<T> | null = null;
@@ -778,6 +781,26 @@ export class Output<
 		}
 
 		this._metadataTags = tags;
+	}
+
+	/**
+	 * Sets the chapters of the media file: named sections of the timeline, such as "Intro" or "Credits". Each
+	 * chapter is defined by its start timestamp and its name; a chapter extends until the start of the next chapter
+	 * (or until the end of the file for the last chapter) unless an explicit end timestamp is provided. When called
+	 * multiple times, only the chapters from the last call will be used.
+	 *
+	 * Chapters are only written to the file if the output format supports them.
+	 *
+	 * Can only be called before the output is started.
+	 */
+	setChapters(chapters: Chapter[]) {
+		validateChapters(chapters);
+
+		if (this.state !== 'pending') {
+			throw new Error('Cannot set chapters after output has been started or canceled.');
+		}
+
+		this._chapters = chapters;
 	}
 
 	/** @internal */

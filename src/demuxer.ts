@@ -6,6 +6,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+import { Chapter } from './chapters';
 import { Input } from './input';
 import { InputTrackBacking } from './input-track';
 import { MetadataTags } from './metadata';
@@ -36,6 +37,14 @@ export abstract class Demuxer {
 	abstract getTrackBackings(): Promise<InputTrackBacking[]>;
 	abstract getMimeType(): Promise<string>;
 	abstract getMetadataTags(): Promise<MetadataTags>;
+
+	/**
+	 * Returns the chapters of the media file. Formats that don't support chapters return an empty array.
+	 * Can be overridden.
+	 */
+	async getChapters(): Promise<Chapter[]> {
+		return [];
+	}
 
 	dispose() {
 		// Can be overridden

@@ -519,6 +519,35 @@ export class Input<S extends Source = Source> extends EventEmitter<InputEvents> 
 	}
 
 	/**
+	 * Returns the list of chapters of the media file, sorted by start time. Each chapter is defined by its start
+	 * timestamp, its end timestamp, and its name. A chapter's end timestamp is either the start timestamp of the
+	 * next chapter or, for the last chapter, the end of the media file, unless the file itself specifies a
+	 * different end.
+	 *
+	 * Returns an empty array if the file contains no chapters or if the format doesn't support chapters.
+	 */
+	async getChapters() {
+		const demuxer = await this._getDemuxer();
+		return demuxer.getChapters();
+	}
+
+	/**
+	 * Returns the chapter that contains the given timestamp (in seconds), or `null` if the timestamp doesn't fall
+	 * into any chapter. A timestamp belongs to a chapter if it is greater than or equal to the chapter's start
+	 * timestamp and less than its end timestamp.
+	 */
+	async getChapterAt(timestamp: number) {
+		if (typeof timestamp !== 'number' || Number.isNaN(timestamp)) {
+			throw new TypeError('timestamp must be a number.');
+		}
+
+		const chapters = await this.getChapters();
+		return chapters.find(chapter => (
+			timestamp >= chapter.start && (chapter.end === undefined || timestamp < chapter.end)
+		)) ?? null;
+	}
+
+	/**
 	 * Disposes this input and frees connected resources. When an input is disposed, ongoing read operations will be
 	 * canceled, all future read operations will fail, any open decoders will be closed, and all ongoing media sink
 	 * operations will be canceled. Disallowed and canceled operations will throw an {@link InputDisposedError}.

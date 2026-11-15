@@ -15,6 +15,7 @@
     "Media sources": "Methods for adding media data to output files.",
     "Conversion": "A simple API for converting and transforming media files.",
 	"Metadata tags": "Descriptive metadata tags attached to media files.",
+	"Chapters": "Named sections of a media file's timeline.",
     "Codecs": "Codecs understood by Mediabunny.",
     "Encoding": "Encoder configuration and encodability checks.",
 	"Decoding": "Decoder configuration and decodability checks.",

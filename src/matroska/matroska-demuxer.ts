@@ -38,6 +38,7 @@ import {
 	InputVideoTrackBacking,
 } from '../input-track';
 import { AttachedFile, DEFAULT_TRACK_DISPOSITION, MetadataTags, TrackDisposition } from '../metadata';
+import { Chapter } from '../chapters';
 import { PacketRetrievalOptions } from '../media-sink';
 import {
 	assert,
@@ -95,6 +96,7 @@ type Segment = {
 	cuesSeen: boolean;
 	attachmentsSeen: boolean;
 	tagsSeen: boolean;
+	chaptersSeen: boolean;
 
 	timestampScale: number;
 	timestampFactor: number;
@@ -117,6 +119,9 @@ type Segment = {
 
 	metadataTags: MetadataTags;
 	metadataTagsPromise: Promise<void> | null;
+
+	/** The chapters parsed from the Chapters element, without derived end timestamps. */
+	chapters: { start: number; end: number | null; name: string }[];
 };
 
 type SeekEntry = {
@@ -290,6 +295,13 @@ export class MatroskaDemuxer extends Demuxer {
 	currentDecodingInstruction: DecodingInstruction | null = null;
 	currentTagTargetIsMovie: boolean = true;
 	currentSimpleTagName: string | null = null;
+	currentChapter: {
+		start: number | null;
+		end: number | null;
+		name: string | null;
+	} | null = null;
+
+	currentEditionNumber = 0;
 	currentAttachedFile: {
 		fileUid: bigint | null;
 		fileName: string | null;
@@ -354,6 +366,48 @@ export class MatroskaDemuxer extends Demuxer {
 		}
 
 		return metadataTags;
+	}
+
+	override async getChapters(): Promise<Chapter[]> {
+		await this.readMetadata();
+
+		// Load chapters from each segment lazily (only once). This uses the same mechanism as metadata tags, since
+		// the Chapters element typically lives at the end of the segment and is found via the seek head.
+		for (const segment of this.segments) {
+			if (!segment.metadataTagsPromise) {
+				if (this.reader.fileSize !== null) {
+					segment.metadataTagsPromise = this.loadSegmentMetadata(segment);
+				} else {
+					// The seeking would be too crazy, let's not
+					segment.metadataTagsPromise = Promise.resolve();
+				}
+			}
+
+			await segment.metadataTagsPromise;
+		}
+
+		const chapters: Chapter[] = [];
+
+		for (const segment of this.segments) {
+			const sortedChapters = [...segment.chapters].sort((a, b) => a.start - b.start);
+			const segmentDuration = segment.duration >= 0 && segment.timestampFactor > 0
+				? (segment.duration * segment.timestampFactor) / 1e9
+				: null;
+
+			for (let i = 0; i < sortedChapters.length; i++) {
+				const chapter = sortedChapters[i]!;
+
+				chapters.push({
+					start: chapter.start,
+					// If a chapter has no explicit end timestamp, it extends until the start of the next
+					// chapter, or until the end of the segment if it is the last chapter
+					end: chapter.end ?? sortedChapters[i + 1]?.start ?? segmentDuration ?? undefined,
+					name: chapter.name,
+				});
+			}
+		}
+
+		return chapters;
 	}
 
 	readMetadata() {
@@ -437,6 +491,7 @@ export class MatroskaDemuxer extends Demuxer {
 			cuesSeen: false,
 			tagsSeen: false,
 			attachmentsSeen: false,
+			chaptersSeen: false,
 
 			timestampScale: -1,
 			timestampFactor: -1,
@@ -457,6 +512,8 @@ export class MatroskaDemuxer extends Demuxer {
 
 			metadataTags: {},
 			metadataTagsPromise: null,
+
+			chapters: [],
 		};
 		this.segments.push(this.currentSegment);
 
@@ -510,12 +567,14 @@ export class MatroskaDemuxer extends Demuxer {
 				if (slice) {
 					this.readContiguousElements(slice);
 				}
-			} else if (id === EBMLId.Tags || id === EBMLId.Attachments) {
+			} else if (id === EBMLId.Tags || id === EBMLId.Attachments || id === EBMLId.Chapters) {
 				// Metadata found at the beginning of the segment, great, let's parse it
 				if (id === EBMLId.Tags) {
 					this.currentSegment.tagsSeen = true;
-				} else {
+				} else if (id === EBMLId.Attachments) {
 					this.currentSegment.attachmentsSeen = true;
+				} else {
+					this.currentSegment.chaptersSeen = true;
 				}
 
 				assertDefinedSize(size);
@@ -975,6 +1034,8 @@ export class MatroskaDemuxer extends Demuxer {
 				// We need to load the tags
 			} else if (seekEntry.id === EBMLId.Attachments && !segment.attachmentsSeen) {
 				// We need to load the attachments
+			} else if (seekEntry.id === EBMLId.Chapters && !segment.chaptersSeen) {
+				// We need to load the chapters
 			} else {
 				continue;
 			}
@@ -1016,6 +1077,8 @@ export class MatroskaDemuxer extends Demuxer {
 				segment.tagsSeen = true;
 			} else if (seekEntry.id === EBMLId.Attachments) {
 				segment.attachmentsSeen = true;
+			} else if (seekEntry.id === EBMLId.Chapters) {
+				segment.chaptersSeen = true;
 			}
 		}
 	}
@@ -1938,6 +2001,65 @@ export class MatroskaDemuxer extends Demuxer {
 				if (!this.currentAttachedFile) break;
 
 				this.currentAttachedFile.fileDescription = readUnicodeString(slice, size);
+			}; break;
+
+			case EBMLId.EditionEntry: {
+				this.currentEditionNumber++;
+
+				// Only the chapters of the first (default) edition are considered
+				if (this.currentEditionNumber === 1) {
+					this.readContiguousElements(slice.slice(dataStartPos, size));
+				}
+			}; break;
+
+			case EBMLId.ChapterAtom: {
+				if (!this.currentSegment) break;
+
+				const chapter = {
+					start: null as number | null,
+					end: null as number | null,
+					name: null as string | null,
+				};
+
+				// Chapter atoms can be nested; keep track of the parent so nested atoms don't clobber it
+				const parentChapter = this.currentChapter;
+				this.currentChapter = chapter;
+
+				this.readContiguousElements(slice.slice(dataStartPos, size));
+
+				this.currentChapter = parentChapter;
+
+				if (chapter.start !== null) {
+					this.currentSegment.chapters.push({
+						start: chapter.start,
+						end: chapter.end,
+						name: chapter.name ?? '',
+					});
+				}
+			}; break;
+
+			case EBMLId.ChapterTimeStart: {
+				if (!this.currentChapter) break;
+
+				// Chapter timestamps are in nanoseconds and not scaled by the segment's TimestampScale
+				this.currentChapter.start = readUnsignedInt(slice, size) / 1e9;
+			}; break;
+
+			case EBMLId.ChapterTimeEnd: {
+				if (!this.currentChapter) break;
+
+				this.currentChapter.end = readUnsignedInt(slice, size) / 1e9;
+			}; break;
+
+			case EBMLId.ChapterDisplay: {
+				this.readContiguousElements(slice.slice(dataStartPos, size));
+			}; break;
+
+			case EBMLId.ChapString: {
+				if (!this.currentChapter) break;
+
+				// Prefer the name of the first ChapterDisplay element
+				this.currentChapter.name ??= readUnicodeString(slice, size);
 			}; break;
 
 			case EBMLId.ContentEncodings: {

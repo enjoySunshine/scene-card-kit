@@ -119,6 +119,7 @@ import {
 	readAscii,
 } from '../reader';
 import { DEFAULT_TRACK_DISPOSITION, MetadataTags, RichImageData, TrackDisposition } from '../metadata';
+import { Chapter } from '../chapters';
 import { AC3_SAMPLE_RATES } from '../../shared/ac3-misc';
 import { Bitstream } from '../../shared/bitstream';
 import { Aes128CbcContext } from '../aes';
@@ -348,6 +349,8 @@ export class IsobmffDemuxer extends Demuxer {
 	isQuickTime = false;
 	metadataTags: MetadataTags = {};
 	currentMetadataKeys: Map<number, string> | null = null;
+	/** The chapters parsed from the Nero chapter list (`chpl` box), without derived end timestamps. */
+	chapters: { start: number; name: string }[] = [];
 
 	isFragmented = false;
 	fragmentTrackDefaults = new Map<number, FragmentTrackDefaults>();
@@ -394,6 +397,25 @@ export class IsobmffDemuxer extends Demuxer {
 	async getMetadataTags() {
 		await this.readMetadata();
 		return this.metadataTags;
+	}
+
+	override async getChapters(): Promise<Chapter[]> {
+		await this.readMetadata();
+
+		const sortedChapters = [...this.chapters].sort((a, b) => a.start - b.start);
+		const movieDuration = this.movieTimescale > 0 && this.movieDurationInTimescale >= 0
+			? this.movieDurationInTimescale / this.movieTimescale
+			: null;
+
+		return sortedChapters.map((chapter, index) => ({
+			start: chapter.start,
+			// Chapter end timestamps aren't stored explicitly; each chapter extends until the start of the
+			// next chapter, or until the end of the movie if it is the last chapter
+			end: index < sortedChapters.length - 1
+				? sortedChapters[index + 1]!.start
+				: movieDuration ?? undefined,
+			name: chapter.name,
+		}));
 	}
 
 	readMetadata() {
@@ -2792,7 +2814,7 @@ export class IsobmffDemuxer extends Demuxer {
 				const iterator = this.iterateContiguousBoxes(slice.slice(contentStartPos, boxInfo.contentSize));
 
 				for (const { boxInfo, slice } of iterator) {
-					if (boxInfo.name !== 'meta' && !this.currentTrack) {
+					if (boxInfo.name !== 'meta' && boxInfo.name !== 'chpl' && !this.currentTrack) {
 						const startPos = slice.filePos;
 						this.metadataTags.raw ??= {};
 
@@ -2870,6 +2892,27 @@ export class IsobmffDemuxer extends Demuxer {
 						case '©lyr': {
 							if (!this.currentTrack) {
 								this.metadataTags.lyrics ??= readMetadataStringShort(slice);
+							}
+						}; break;
+
+						case 'chpl': { // Nero chapter list
+							if (this.currentTrack) {
+								break;
+							}
+
+							slice.skip(4); // Version + flags
+							slice.skip(4); // Reserved
+
+							const chapterCount = readU8(slice);
+							for (let i = 0; i < chapterCount; i++) {
+								const startTime = readU64Be(slice); // In 100ns units
+								const nameLength = readU8(slice);
+								const name = textDecoder.decode(readBytes(slice, nameLength));
+
+								this.chapters.push({
+									start: startTime / 1e7,
+									name,
+								});
 							}
 						}; break;
 					}

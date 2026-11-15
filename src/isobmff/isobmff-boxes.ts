@@ -61,6 +61,7 @@ import {
 	parseOpusIdentificationHeader,
 } from '../codec-data';
 import { MetadataTags, RichImageData } from '../metadata';
+import { Chapter } from '../chapters';
 import { Bitstream } from '../../shared/bitstream';
 import { VERSIONED_NAME } from '../version';
 
@@ -1691,11 +1692,51 @@ const udta = (muxer: IsobmffMuxer) => {
 		addQuickTimeMetadataTagBoxes(boxes, muxer.output._metadataTags);
 	}
 
+	const chapters = muxer.output._chapters;
+	if (chapters.length > 0) {
+		boxes.push(chpl(chapters));
+	}
+
 	if (boxes.length === 0) {
 		return null;
 	}
 
 	return box('udta', undefined, boxes);
+};
+
+/**
+ * Nero Chapter List Box: Stores the chapters of the movie as a simple list of start timestamps and titles.
+ * Chapter end timestamps are not stored explicitly; each chapter extends until the start of the next chapter.
+ */
+const chpl = (chapters: Chapter[]) => {
+	if (chapters.length > 255) {
+		throw new Error('MP4/QuickTime files support at most 255 chapters.');
+	}
+
+	const contents: NestedNumberArray = [
+		u8(1), // Version
+		u24(0), // Flags
+		u32(0), // Reserved
+		u8(chapters.length), // Chapter count
+	];
+
+	for (const chapter of chapters) {
+		const nameBytes = textEncoder.encode(chapter.name);
+		if (nameBytes.length > 255) {
+			throw new Error(
+				`The chapter name "${chapter.name}" is too long: MP4/QuickTime chapter names can be at most`
+				+ ' 255 bytes long.',
+			);
+		}
+
+		contents.push(
+			u64(Math.round(chapter.start * 1e7)), // Start timestamp in 100ns units
+			u8(nameBytes.length),
+			[...nameBytes],
+		);
+	}
+
+	return box('chpl', contents);
 };
 
 const addQuickTimeMetadataTagBoxes = (boxes: Box[], tags: MetadataTags) => {

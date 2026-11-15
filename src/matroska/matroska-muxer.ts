@@ -162,6 +162,7 @@ export class MatroskaMuxer extends Muxer {
 	private tracksElement: EBMLElement | null = null;
 	private tagsElement: EBMLElement | null = null;
 	private attachmentsElement: EBMLElement | null = null;
+	private chaptersElement: EBMLElement | null = null;
 	private segmentDuration: EBMLElement | null = null;
 	private cues: EBMLElement | null = null;
 
@@ -246,6 +247,7 @@ export class MatroskaMuxer extends Muxer {
 		const kaxInfo = new Uint8Array([0x15, 0x49, 0xa9, 0x66]);
 		const kaxTracks = new Uint8Array([0x16, 0x54, 0xae, 0x6b]);
 		const kaxAttachments = new Uint8Array([0x19, 0x41, 0xa4, 0x69]);
+		const kaxChapters = new Uint8Array([0x10, 0x43, 0xa7, 0x70]);
 		const kaxTags = new Uint8Array([0x12, 0x54, 0xc3, 0x67]);
 
 		// Entries are ordered by their position in the file
@@ -278,6 +280,18 @@ export class MatroskaMuxer extends Muxer {
 							size: 5,
 							data: writeOffsets
 								? this.ebmlWriter.offsets.get(this.attachmentsElement)! - this.segmentDataOffset
+								: 0,
+						},
+					] }
+				: null,
+			this.output._chapters.length > 0
+				? { id: EBMLId.Seek, data: [
+						{ id: EBMLId.SeekID, data: kaxChapters },
+						{
+							id: EBMLId.SeekPosition,
+							size: 5,
+							data: writeOffsets && this.chaptersElement
+								? this.ebmlWriter.offsets.get(this.chaptersElement)! - this.segmentDataOffset
 								: 0,
 						},
 					] }
@@ -752,6 +766,41 @@ export class MatroskaMuxer extends Muxer {
 		}
 
 		this.attachmentsElement = { id: EBMLId.Attachments, data: elements };
+	}
+
+	/**
+	 * Writes the Chapters element to the end of the segment. This happens at finalization time so that the end
+	 * timestamp of the last chapter (which defaults to the duration of the media) is known.
+	 */
+	private writeChaptersElement() {
+		const chapters = this.output._chapters;
+		if (chapters.length === 0) {
+			return;
+		}
+
+		// The duration of the media in seconds, used as the default end timestamp of the last chapter
+		const mediaDuration = this.startTimestamp === Infinity ? 0 : this.endTimestamp / 1000;
+
+		const chapterAtoms: EBML[] = chapters.map((chapter, index) => {
+			const end = chapter.end
+				?? (index < chapters.length - 1 ? chapters[index + 1]!.start : mediaDuration);
+
+			return { id: EBMLId.ChapterAtom, data: [
+				{ id: EBMLId.ChapterUID, data: index + 1 },
+				// Chapter timestamps are in nanoseconds and not scaled by the segment's TimestampScale
+				{ id: EBMLId.ChapterTimeStart, data: Math.round(chapter.start * 1e9) },
+				{ id: EBMLId.ChapterTimeEnd, data: Math.round(Math.max(end, chapter.start) * 1e9) },
+				{ id: EBMLId.ChapterDisplay, data: [
+					{ id: EBMLId.ChapString, data: new EBMLUnicodeString(chapter.name) },
+				] },
+			] };
+		});
+
+		this.chaptersElement = { id: EBMLId.Chapters, data: [
+			{ id: EBMLId.EditionEntry, data: chapterAtoms },
+		] };
+
+		this.ebmlWriter.writeEBML(this.chaptersElement);
 	}
 
 	private createSegment() {
@@ -1481,6 +1530,8 @@ export class MatroskaMuxer extends Muxer {
 		if (this.currentClusterStartMsTimestamp !== null) {
 			this.writeCurrentCluster();
 		}
+
+		this.writeChaptersElement();
 
 		assert(this.cues);
 		this.ebmlWriter.writeEBML(this.cues);
